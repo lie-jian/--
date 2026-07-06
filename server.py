@@ -206,13 +206,16 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
     def send_ok(self, content, content_type="text/html; charset=utf-8"):
         if isinstance(content, str):
             content = content.encode("utf-8")
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(content)))
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Cache-Control", "no-cache")
-        self.end_headers()
-        self.wfile.write(content)
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(content)))
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Cache-Control", "no-cache")
+            self.end_headers()
+            self.wfile.write(content)
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            pass
 
     def serve_local_file(self, file_path):
         # 如果是绝对路径就直接用，否则相对于 LOCAL_DIR
@@ -269,12 +272,18 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(e.read())
         except Exception as e:
             err_msg = str(e).encode("ascii", errors="replace").decode("ascii")
-            self.send_error(502, "Upstream error: %s" % err_msg)
+            try:
+                self.send_error(502, "Upstream error: %s" % err_msg)
+            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                pass
 
     def proxy_upstream_and_cache_children(self, upstream_path, gal_path, parent_id, body, content_type):
         """代理 GetChildDrawingDir 请求并缓存结果"""
         if OFFLINE_MODE:
-            self.send_error(503, "Offline mode - children not cached")
+            try:
+                self.send_error(503, "Offline mode - children not cached")
+            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                pass
             return
         url = UPSTREAM + upstream_path
         req_headers = {
@@ -320,7 +329,10 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
                 self.wfile.write(e.read())
         except Exception as e:
             err_msg = str(e).encode("ascii", errors="replace").decode("ascii")
-            self.send_error(502, "Upstream error: %s" % err_msg)
+            try:
+                self.send_error(502, "Upstream error: %s" % err_msg)
+            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                pass
 
     def proxy_upstream_and_cache_image(self, upstream_path, img_key):
         """代理图片/CSS 请求并缓存"""
