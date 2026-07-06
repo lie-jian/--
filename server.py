@@ -574,7 +574,13 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
         # 1. 本地 API 端点: /api/
         if path.startswith("/api/"):
             call_type, paras = self.parse_api_body(body)
-            self.handle_local_api(call_type, paras)
+            if self.handle_local_api(call_type, paras):
+                return
+            # 本地无法处理 → 返回错误，因为没有代理回退
+            try:
+                self.send_error(503, "Data not available locally")
+            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+                pass
             return
 
         # 2. /proxy/ 前缀 → 先尝试本地缓存，再代理
