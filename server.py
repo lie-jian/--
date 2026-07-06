@@ -26,6 +26,7 @@ PORT = 8000
 LOCAL_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(LOCAL_DIR, "data")
 UPSTREAM = "http://dev.inkcad.com"
+OFFLINE_MODE = False  # True=纯本地模式（不访问源站），False=代理回退模式
 
 # 本地前端文件
 LOCAL_FILES = {"/", "/index.html", "/app.js", "/style.css", "/favicon.ico"}
@@ -230,6 +231,9 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
     # ===== 代理上游 =====
     def proxy_upstream(self, upstream_path, method="GET", body=None, extra_headers=None,
                        save_content_key=None):
+        if OFFLINE_MODE:
+            self.send_error(503, "Offline mode - data not cached")
+            return
         url = UPSTREAM + upstream_path
         req_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -269,6 +273,9 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
 
     def proxy_upstream_and_cache_children(self, upstream_path, gal_path, parent_id, body, content_type):
         """代理 GetChildDrawingDir 请求并缓存结果"""
+        if OFFLINE_MODE:
+            self.send_error(503, "Offline mode - children not cached")
+            return
         url = UPSTREAM + upstream_path
         req_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -317,6 +324,9 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
 
     def proxy_upstream_and_cache_image(self, upstream_path, img_key):
         """代理图片/CSS 请求并缓存"""
+        if OFFLINE_MODE:
+            self.send_error(503, "Offline mode - image/CSS not cached")
+            return
         url = UPSTREAM + upstream_path
         req_headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
