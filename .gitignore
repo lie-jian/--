@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# 数据缓存（运行时自动生成，不纳入版本管理）
+data/
+
+# 原始逆向分析文件（参考用，非项目代码）
+source.html
+dirTree.txt
+dirTreeEL.txt
+galList.txt
+contentSample.html
+WebBookIndex.js
+
+# 临时文件
+*.tmp
+*.temp
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

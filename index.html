@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>机械工程师设计手册</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <!-- 顶部导航栏 -->
+    <header class="topbar">
+        <div class="topbar-left">
+            <div class="logo">
+                <span class="logo-icon">📚</span>
+                <span class="logo-text">工程手册在线</span>
+            </div>
+        </div>
+        <div class="topbar-center">
+            <div class="book-selector">
+                <label for="cmbList" class="selector-label">书目：</label>
+                <select id="cmbList" class="book-select">
+                    <option value="">加载中...</option>
+                </select>
+            </div>
+            <div class="search-box">
+                <input type="text" id="txtFind" class="search-input" placeholder="输入关键词搜索内容...">
+                <button id="btnQuery" class="search-btn" title="搜索">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="11" cy="11" r="8"></circle>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                    </svg>
+                </button>
+            </div>
+        </div>
+        <div class="topbar-right">
+            <button id="hrefPrvPage" class="nav-btn" title="上一页">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="15 18 9 12 15 6"></polyline>
+                </svg>
+                <span>上一页</span>
+            </button>
+            <button id="hrefNextPage" class="nav-btn" title="下一页">
+                <span>下一页</span>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <polyline points="9 18 15 12 9 6"></polyline>
+                </svg>
+            </button>
+        </div>
+    </header>
+
+    <!-- 主体区域 -->
+    <div class="main-container">
+        <!-- 左侧导航 -->
+        <aside class="sidebar" id="sidebar">
+            <!-- 侧边栏头部 -->
+            <div class="sidebar-header">
+                <div class="sidebar-tabs">
+                    <button class="sidebar-tab active" data-tab="tree">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+                        </svg>
+                        目录
+                    </button>
+                    <button class="sidebar-tab" data-tab="search">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="11" cy="11" r="8"></circle>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        </svg>
+                        搜索结果
+                    </button>
+                </div>
+                <button class="sidebar-toggle" id="sidebarToggle" title="折叠/展开">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="15 18 9 12 15 6"></polyline>
+                    </svg>
+                </button>
+            </div>
+
+            <!-- 目录树面板 -->
+            <div class="sidebar-panel active" id="panelTree">
+                <div class="tree-container" id="treeContainer">
+                    <div class="loading">
+                        <div class="spinner"></div>
+                        <span>加载目录中...</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 搜索结果面板 -->
+            <div class="sidebar-panel" id="panelSearch">
+                <div class="search-results" id="searchResults">
+                    <div class="empty-state">
+                        <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                            <circle cx="11" cy="11" r="8"></circle>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        </svg>
+                        <p>请输入关键词进行搜索</p>
+                    </div>
+                </div>
+            </div>
+        </aside>
+
+        <!-- 拖拽分隔条 -->
+        <div class="resizer" id="resizer"></div>
+
+        <!-- 右侧内容区 -->
+        <main class="content-area">
+            <div class="content-wrapper">
+                <iframe id="idManualContent" name="ManualContent" frameborder="0" src=""></iframe>
+                <div class="content-empty" id="contentEmpty">
+                    <div class="empty-content">
+                        <svg width="80" height="80" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1">
+                            <path d="M2 3h6a4 4 0 0 1 4 4v14a3 3 0 0 0-3-3H2z"></path>
+                            <path d="M22 3h-6a4 4 0 0 0-4 4v14a3 3 0 0 1 3-3h7z"></path>
+                        </svg>
+                        <h2>欢迎使用工程手册在线</h2>
+                        <p>请从左侧目录中选择一个章节开始阅读</p>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- 隐藏字段（兼容原网站逻辑） -->
+    <input type="hidden" id="hidActiveUserId" value="0">
+    <input type="hidden" id="hidActiveGalId">
+    <input type="hidden" id="hidActiveGalName" value="机械工程师设计手册">
+    <input type="hidden" id="hidActiveGalPath" value="">
+    <input type="hidden" id="hidActiveDirId" value="0">
+
+    <script src="app.js"></script>
+</body>
+</html>
