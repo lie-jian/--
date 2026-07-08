@@ -1,16 +1,15 @@
+
 /* ============================================================
- * 机械工程师设计手册 - 前端逻辑 v2
- * 数据优先从本地缓存读取，源站关闭时仍可独立运行
+ * 机械工程师设计手册 - 前端逻辑 v3（纯本地）
+ * 所有数据来自本地 data/ 目录，无需访问原站
  * ============================================================ */
 
 (function () {
     'use strict';
 
     // ===== 配置 =====
-    // 本地 API（数据来自 data/ 目录），回退到代理
     const LOCAL_API = '/api/';
-    // 内容页代理（服务器会优先用本地缓存）
-    const CONTENT_PAGE = '/proxy/ykyapp/App/ManualContentPage.aspx';
+    const CONTENT_PAGE = '/ykyapp/App/ManualContentPage.aspx';
 
     // ===== 全局状态 =====
     const state = {
@@ -19,7 +18,6 @@
         treeData: [],
         loadedNodes: new Set(),
         selectedNodeId: null,
-        useLocalData: true,  // 默认使用本地数据
     };
 
     // ===== DOM 元素 =====
@@ -44,19 +42,10 @@
     };
 
     // ============================================================
-    // API 调用层
+    // API 调用层（纯本地）
     // ============================================================
 
-    function callApi(callType, paras, useLocalFallback) {
-        // 先尝试本地 API
-        if (state.useLocalData) {
-            return callLocalApi(callType, paras)
-                .catch(() => callProxyApi(callType, paras));
-        }
-        return callProxyApi(callType, paras);
-    }
-
-    function callLocalApi(callType, paras) {
+    function callApi(callType, paras) {
         const parasJson = JSON.stringify(paras);
         const body = `callType=${encodeURIComponent(callType)}&callParas=${encodeURIComponent(parasJson)}`;
 
@@ -66,29 +55,19 @@
             body: body,
         })
             .then((resp) => {
-                if (!resp.ok) throw new Error('Local API not available');
+                if (!resp.ok) throw new Error('HTTP ' + resp.status);
                 return resp.text();
             })
-            .then((text) => parseApiResponse(text));
-    }
-
-    function callProxyApi(callType, paras) {
-        const proxyUrl = '/proxy/ykyapp/App/ykyApp.ashx';
-        const parasJson = JSON.stringify(paras);
-        const body = `callType=${encodeURIComponent(callType)}&callParas=${encodeURIComponent(parasJson)}`;
-
-        return fetch(proxyUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8' },
-            body: body,
-        })
-            .then((resp) => resp.text())
             .then((text) => parseApiResponse(text));
     }
 
     function parseApiResponse(responseText) {
         if (!responseText || responseText.length === 0) {
             throw new Error('Empty response');
+        }
+        const trimmed = responseText.trim();
+        if (!trimmed.startsWith('var retJson')) {
+            throw new Error('Invalid response (not retJson)');
         }
         let retJson;
         try {
@@ -272,7 +251,6 @@
         loadContent(node.itempath, node.itemcontent);
 
         const hasChildren = node.children && node.children.length > 0;
-        // 如果节点有子节点但闭包引用为空，从 DOM 中查找
         if (hasChildren && !childrenContainer) {
             childrenContainer = itemEl.parentNode.querySelector('.tree-children');
         }
@@ -310,7 +288,6 @@
             .then(({ data }) => {
                 loadingEl.remove();
                 if (data && data.length > 0) {
-                    // 更新数据模型，使下次点击能切换折叠
                     node.children = data;
 
                     let childrenContainer = itemEl.parentNode.querySelector('.tree-children');
@@ -336,7 +313,7 @@
             })
             .catch((err) => {
                 loadingEl.remove();
-                console.error('懒加载子节点失败:', err);
+                console.warn('懒加载子节点失败:', err.message);
             });
     }
 
@@ -347,7 +324,6 @@
     function loadContent(itempath, itemcontent, word) {
         if (!state.currentBook) return;
         const gal = state.currentBook.path;
-        // 通过代理路径加载，服务器会优先使用本地缓存
         let url = `${CONTENT_PAGE}?gal=${encodeURIComponent(gal)}&path=${encodeURIComponent(itempath)}&content=${encodeURIComponent(itemcontent)}`;
         if (word) {
             url += `&word=${encodeURIComponent(word)}`;

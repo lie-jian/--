@@ -1,32 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-工程手册服务器
-- 优先从本地 data/ 目录读取缓存数据
-- 本地无缓存时回退代理到 dev.inkcad.com
-- 源站关闭时，只要数据已下载，仍可独立运行
+工程手册本地服务器（纯离线版本）
+- 仅从本地 data/ 目录读取已下载的缓存数据
+- 不访问原站，无代理逻辑
+- 启动后即可独立运行
 """
 
 import os
 import re
 import sys
 import json
-import time
-import threading
-import subprocess
-import tempfile
-import urllib.request
 import urllib.parse
-import urllib.error
 import http.server
 import socketserver
-from http.cookiejar import CookieJar
 
 # ===== 配置 =====
 PORT = 8000
 LOCAL_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(LOCAL_DIR, "data")
-UPSTREAM = "http://dev.inkcad.com"
-OFFLINE_MODE = False  # True=纯本地模式（不访问源站），False=代理回退模式
 
 # 本地前端文件
 LOCAL_FILES = {"/", "/index.html", "/app.js", "/style.css", "/favicon.ico"}
@@ -40,91 +31,22 @@ MIME_TYPES = {
     ".gif": "image/gif", ".svg": "image/svg+xml", ".ico": "image/x-icon",
     ".woff": "font/woff", ".woff2": "font/woff2", ".ttf": "font/ttf",
     ".eot": "application/vnd.ms-fontobject",
+    ".xml": "application/xml; charset=utf-8",
+    ".mso": "application/octet-stream",
+    ".thmx": "application/octet-stream",
 }
 
-# ===== 本地数据缓存帮助函数 =====
+# ===== 文件名工具 =====
 
 def sanitize_filename(name):
-    return name.replace("/", "_").replace("\\", "_").replace("?", "_").replace(":", "_") \
-               .replace("*", "_").replace('"', "_").replace("<", "_").replace(">", "_").replace("|", "_")
-
-def load_local_json(filepath):
-    """加载本地 JSON 文件"""
-    if os.path.exists(filepath):
-        with open(filepath, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return None
-
-def get_local_content(book_path, itempath, itemcontent):
-    """获取本地缓存的内容页"""
-    safe_book = sanitize_filename(book_path)
-    fname = sanitize_filename(itempath + "_" + itemcontent) + ".html"
-    fpath = os.path.join(DATA_DIR, "contents", safe_book, fname)
-    if os.path.exists(fpath) and os.path.getsize(fpath) > 500:
-        with open(fpath, "rb") as f:
-            return f.read()
-    return None
-
-def get_local_tree(book_path):
-    """获取本地缓存的目录树"""
-    safe = sanitize_filename(book_path)
-    fpath = os.path.join(DATA_DIR, "trees", f"{safe}.json")
-    return load_local_json(fpath)
-
-def get_local_children(book_path, parent_id):
-    """获取本地缓存的子节点"""
-    safe = sanitize_filename(book_path)
-    cdir = os.path.join(DATA_DIR, "children", safe)
-    fpath = os.path.join(cdir, f"{parent_id}.json")
-    return load_local_json(fpath)
-
-def save_local_children(book_path, parent_id, children):
-    """保存子节点到本地缓存"""
-    safe = sanitize_filename(book_path)
-    cdir = os.path.join(DATA_DIR, "children", safe)
-    os.makedirs(cdir, exist_ok=True)
-    fpath = os.path.join(cdir, f"{parent_id}.json")
-    with open(fpath, "w", encoding="utf-8") as f:
-        json.dump(children, f, ensure_ascii=False, indent=2)
-
-def save_local_content(book_path, itempath, itemcontent, data):
-    """保存内容页到本地缓存"""
-    safe_book = sanitize_filename(book_path)
-    fname = sanitize_filename(itempath + "_" + itemcontent) + ".html"
-    content_dir = os.path.join(DATA_DIR, "contents", safe_book)
-    os.makedirs(content_dir, exist_ok=True)
-    fpath = os.path.join(content_dir, fname)
-    try:
-        with open(fpath, "wb") as f:
-            f.write(data)
-    except:
-        pass
-
-
-def get_local_image(img_path):
-    """获取本地缓存的图片"""
-    fpath = os.path.join(DATA_DIR, "images", *split_and_sanitize_path(img_path))
-    if os.path.exists(fpath) and os.path.getsize(fpath) > 100:
-        return fpath
-    return None
-
-
-def save_local_image(img_path, data):
-    """保存图片到本地缓存，保留目录结构"""
-    parts = split_and_sanitize_path(img_path)
-    fpath = os.path.join(DATA_DIR, "images", *parts)
-    img_dir = os.path.dirname(fpath)
-    os.makedirs(img_dir, exist_ok=True)
-    try:
-        with open(fpath, "wb") as f:
-            f.write(data)
-    except:
-        pass
+    """替换 Windows 文件名非法字符"""
+    return (name.replace("/", "_").replace("\\", "_").replace("?", "_")
+                .replace(":", "_").replace("*", "_").replace('"', "_")
+                .replace("<", "_").replace(">", "_").replace("|", "_"))
 
 
 def split_and_sanitize_path(path_str):
-    """按路径分隔符拆分并逐个 sanitize，保留目录结构"""
-    # 去掉开头 / 和 ../
+    """按 / 拆分路径并逐段 sanitize，保留目录结构"""
     clean = path_str.lstrip("/").replace("\\", "/")
     parts = clean.split("/")
     result = []
@@ -135,79 +57,122 @@ def split_and_sanitize_path(path_str):
     return result
 
 
-def save_api_response(paras, response_data):
-    """保存 API 响应到本地缓存"""
-    gal_path = paras.get("galPath", "")
-    if not gal_path:
-        return
-    safe = sanitize_filename(gal_path)
-    os.makedirs(os.path.join(DATA_DIR, "trees"), exist_ok=True)
+# ===== 本地数据访问 =====
 
-    # 解析响应数据
-    try:
-        text = response_data.decode("utf-8")
-        match = re.search(r"var retJson=(\{.*?\});", text, re.DOTALL)
-        if not match:
-            return
-        ret = json.loads(match.group(1))
-        sc = ret.get("scriptCode", "")
-
-        if "_templetData" in sc:
-            # 用 Node.js 解析
-            nodes = execute_js_data(sc, "_templetData")
-            if nodes:
-                tree_path = os.path.join(DATA_DIR, "trees", f"{safe}.json")
-                with open(tree_path, "w", encoding="utf-8") as f:
-                    json.dump(nodes, f, ensure_ascii=False, indent=2)
-    except:
-        pass
-
-
-def execute_js_data(script_code, var_name):
-    """用 Node.js 解析 JS 数据"""
-    import subprocess, tempfile
-    wrap = script_code + "\nconsole.log(JSON.stringify(" + var_name + "));\n"
-    tf = tempfile.NamedTemporaryFile(mode='w', suffix='.js', delete=False, encoding='utf-8')
-    try:
-        tf.write(wrap)
-        tf.close()
-        result = subprocess.run(["node", tf.name], capture_output=True, text=True, timeout=15)
-        if result.returncode == 0 and result.stdout.strip():
-            return json.loads(result.stdout.strip())
-    except:
-        pass
-    finally:
+def load_local_json(filepath):
+    if os.path.exists(filepath):
         try:
-            os.unlink(tf.name)
-        except:
-            pass
+            with open(filepath, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
     return None
 
 
+def get_local_tree(book_path):
+    """读取目录树"""
+    safe = sanitize_filename(book_path)
+    return load_local_json(os.path.join(DATA_DIR, "trees", f"{safe}.json"))
+
+
+def get_local_children(book_path, parent_id):
+    """读取子节点缓存"""
+    safe = sanitize_filename(book_path)
+    return load_local_json(os.path.join(DATA_DIR, "children", safe, f"{parent_id}.json"))
+
+
+def get_local_content(book_path, itempath, itemcontent):
+    """读取内容页 HTML"""
+    safe_book = sanitize_filename(book_path)
+    fname = sanitize_filename(itempath + "_" + itemcontent) + ".html"
+    fpath = os.path.join(DATA_DIR, "contents", safe_book, fname)
+    if os.path.exists(fpath) and os.path.getsize(fpath) > 100:
+        with open(fpath, "rb") as f:
+            return f.read()
+    return None
+
+
+def get_local_image_path(img_path):
+    """返回本地图片文件的绝对路径，不存在则返回 None"""
+    parts = split_and_sanitize_path(img_path)
+    if not parts:
+        return None
+    fpath = os.path.join(DATA_DIR, "images", *parts)
+    if os.path.exists(fpath) and os.path.getsize(fpath) > 0:
+        return fpath
+    return None
+
+
+# ===== API 响应构造（兼容原站格式） =====
+
 def make_api_response(data, var_name="_templetData"):
-    """构造与原站格式一致的 API 响应"""
+    """生成原站 API 响应格式：var retJson={result,scriptCode:'var _templetData=[...]'};"""
     script_code = f"var {var_name}=" + json.dumps(data, ensure_ascii=False) + ";"
     ret = {"result": "0", "scriptCode": script_code, "err": ""}
     return ("var retJson=" + json.dumps(ret, ensure_ascii=False) + ";").encode("utf-8")
 
 
+def make_error_response(err_msg, result="1"):
+    ret = {"result": result, "scriptCode": "", "err": err_msg}
+    return ("var retJson=" + json.dumps(ret, ensure_ascii=False) + ";").encode("utf-8")
+
+
+# ===== 树搜索 =====
+
+def search_tree(nodes, keyword):
+    """递归搜索目录树"""
+    results = []
+    lower_kw = keyword.lower()
+
+    def walk(node_list):
+        for node in node_list:
+            text = node.get("text", "")
+            if lower_kw in text.lower():
+                results.append({
+                    "text": text,
+                    "id": node.get("id", ""),
+                    "itempath": node.get("itempath", ""),
+                    "itemcontent": node.get("itemcontent", ""),
+                    "fullpath": node.get("fullpath", ""),
+                })
+            children = node.get("children")
+            if children:
+                walk(children)
+
+    walk(nodes)
+    return results
+
+
+def find_children_in_tree(nodes, parent_id):
+    """在目录树中递归查找指定 ID 的子节点列表"""
+    parent_id = str(parent_id)
+    for node in nodes:
+        node_id = node.get("id", "")
+        # ID 形如 "F123" 或 "123"
+        if node_id == parent_id or node_id == "F" + parent_id:
+            return node.get("children", [])
+        if node_id.startswith("F") and node_id[1:] == parent_id:
+            return node.get("children", [])
+        children = node.get("children")
+        if children:
+            result = find_children_in_tree(children, parent_id)
+            if result:
+                return result
+    return None
+
+
+# ===== HTTP 处理器 =====
+
 class RequestHandler(http.server.BaseHTTPRequestHandler):
-    cookie_jar = CookieJar()
-    opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(cookie_jar))
-
-    # 后台预取线程池
-    _prefetch_lock = threading.Lock()
-    _prefetch_queue = set()
-
     def log_message(self, fmt, *args):
         sys.stderr.write("[%s] %s\n" % (self.log_date_time_string(), fmt % args))
 
-    # ===== 发送响应 =====
-    def send_ok(self, content, content_type="text/html; charset=utf-8"):
+    # ----- 响应工具 -----
+    def send_bytes(self, content, content_type="text/html; charset=utf-8", status=200):
         if isinstance(content, str):
             content = content.encode("utf-8")
         try:
-            self.send_response(200)
+            self.send_response(status)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(content)))
             self.send_header("Access-Control-Allow-Origin", "*")
@@ -217,406 +182,302 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
         except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
             pass
 
-    def serve_local_file(self, file_path):
-        # 如果是绝对路径就直接用，否则相对于 LOCAL_DIR
-        if os.path.isabs(file_path) and os.path.exists(file_path):
-            full = file_path
+    def send_text(self, text, status=200, content_type="text/plain; charset=utf-8"):
+        self.send_bytes(text.encode("utf-8"), content_type, status)
+
+    def send_json(self, obj, status=200):
+        self.send_bytes(json.dumps(obj, ensure_ascii=False).encode("utf-8"),
+                        "application/json; charset=utf-8", status)
+
+    def send_api(self, data, var_name="_templetData"):
+        self.send_bytes(make_api_response(data, var_name),
+                        "application/javascript; charset=utf-8")
+
+    def send_api_error(self, err, result="1"):
+        self.send_bytes(make_error_response(err, result),
+                        "application/javascript; charset=utf-8")
+
+    def send_not_found(self, msg="Not found"):
+        self.send_text(msg, status=404)
+
+    def serve_file(self, abs_path):
+        if not os.path.exists(abs_path) or os.path.isdir(abs_path):
+            self.send_not_found()
+            return
+        ext = os.path.splitext(abs_path)[1].lower()
+        with open(abs_path, "rb") as f:
+            content = f.read()
+        self.send_bytes(content, MIME_TYPES.get(ext, "application/octet-stream"))
+
+    # ----- 静态前端文件 -----
+    def serve_frontend(self, path):
+        if path == "/" or path == "":
+            target = "index.html"
         else:
-            full = os.path.join(LOCAL_DIR, file_path.lstrip("/"))
+            target = path.lstrip("/")
+        full = os.path.join(LOCAL_DIR, target)
         if not os.path.exists(full) or os.path.isdir(full):
-            self.send_error(404, "Not found")
+            self.send_not_found()
             return
         ext = os.path.splitext(full)[1].lower()
         with open(full, "rb") as f:
             content = f.read()
-        self.send_ok(content, MIME_TYPES.get(ext, "application/octet-stream"))
+        self.send_bytes(content, MIME_TYPES.get(ext, "application/octet-stream"))
 
-    # ===== 代理上游 =====
-    def proxy_upstream(self, upstream_path, method="GET", body=None, extra_headers=None,
-                       save_content_key=None):
-        if OFFLINE_MODE:
-            self.send_error(503, "Offline mode - data not cached")
-            return
-        url = UPSTREAM + upstream_path
-        req_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "*/*",
-            "Referer": UPSTREAM + "/ykyapp/App/WebBookIndex.aspx",
-        }
-        if extra_headers:
-            req_headers.update(extra_headers)
-
-        req = urllib.request.Request(url, data=body, method=method, headers=req_headers)
-
-        try:
-            resp = self.opener.open(req, timeout=30)
-            content = resp.read()
-            resp_headers = dict(resp.headers)
-
-            # 写透缓存：如果是内容页，保存到本地
-            if save_content_key:
-                save_local_content(*save_content_key, content)
-
-            self.send_response(resp.status)
-            for k in ["Content-Type", "Content-Length"]:
-                if k in resp_headers:
-                    self.send_header(k, resp_headers[k])
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(content)
-        except urllib.error.HTTPError as e:
-            self.send_response(e.code)
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            if e.fp:
-                self.wfile.write(e.read())
-        except Exception as e:
-            err_msg = str(e).encode("ascii", errors="replace").decode("ascii")
-            try:
-                self.send_error(502, "Upstream error: %s" % err_msg)
-            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
-                pass
-
-    def proxy_upstream_and_cache_children(self, upstream_path, gal_path, parent_id, body, content_type):
-        """代理 GetChildDrawingDir 请求并缓存结果"""
-        if OFFLINE_MODE:
-            try:
-                self.send_error(503, "Offline mode - children not cached")
-            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
-                pass
-            return
-        url = UPSTREAM + upstream_path
-        req_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "*/*",
-            "Referer": UPSTREAM + "/ykyapp/App/WebBookIndex.aspx",
-            "Content-Type": content_type,
-        }
-        req = urllib.request.Request(url, data=body, method="POST", headers=req_headers)
-        try:
-            resp = self.opener.open(req, timeout=30)
-            content = resp.read()
-            resp_headers = dict(resp.headers)
-
-            # 解析并缓存子节点数据
-            try:
-                text = content.decode("utf-8")
-                match = re.search(r"var retJson=(\{.*?\});", text, re.DOTALL)
-                if match:
-                    ret = json.loads(match.group(1))
-                    sc = ret.get("scriptCode", "")
-                    if "_templetData" in sc:
-                        nodes = execute_js_data(sc, "_templetData")
-                        if nodes:
-                            save_local_children(gal_path, parent_id, nodes)
-                            # 后台预取更深层子节点
-                            prefetch_deep_children(gal_path, nodes)
-            except:
-                pass
-
-            self.send_response(resp.status)
-            for k in ["Content-Type", "Content-Length"]:
-                if k in resp_headers:
-                    self.send_header(k, resp_headers[k])
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(content)
-        except urllib.error.HTTPError as e:
-            self.send_response(e.code)
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            if e.fp:
-                self.wfile.write(e.read())
-        except Exception as e:
-            err_msg = str(e).encode("ascii", errors="replace").decode("ascii")
-            try:
-                self.send_error(502, "Upstream error: %s" % err_msg)
-            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
-                pass
-
-    def proxy_upstream_and_cache_image(self, upstream_path, img_key):
-        """代理图片/CSS 请求并缓存"""
-        if OFFLINE_MODE:
-            self.send_error(503, "Offline mode - image/CSS not cached")
-            return
-        url = UPSTREAM + upstream_path
-        req_headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-            "Accept": "*/*",
-            "Referer": UPSTREAM + "/ykyapp/App/WebBookIndex.aspx",
-        }
-        req = urllib.request.Request(url, method="GET", headers=req_headers)
-        try:
-            resp = self.opener.open(req, timeout=30)
-            content = resp.read()
-            resp_headers = dict(resp.headers)
-
-            # 缓存图片
-            if len(content) > 100:
-                save_local_image(img_key, content)
-
-            self.send_response(resp.status)
-            for k in ["Content-Type", "Content-Length"]:
-                if k in resp_headers:
-                    self.send_header(k, resp_headers[k])
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            self.wfile.write(content)
-        except urllib.error.HTTPError as e:
-            self.send_response(e.code)
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.end_headers()
-            if e.fp:
-                self.wfile.write(e.read())
-        except Exception as e:
-            err_msg = str(e).encode("ascii", errors="replace").decode("ascii")
-            self.send_error(502, "Upstream error: %s" % err_msg)
-
-    # ===== API 解析 =====
+    # ----- API 处理 -----
     def parse_api_body(self, body):
-        """解析 POST body 中的 callType 和 callParas"""
-        params = urllib.parse.parse_qs(body.decode("utf-8") if isinstance(body, bytes) else body)
+        try:
+            params = urllib.parse.parse_qs(body.decode("utf-8") if isinstance(body, bytes) else body)
+        except Exception:
+            return "", {}
         call_type = params.get("callType", [""])[0]
         call_paras_str = params.get("callParas", ["{}"])[0]
         try:
             paras = json.loads(call_paras_str)
-        except:
+        except Exception:
             paras = {}
         return call_type, paras
 
-    # ===== 处理本地 API 请求 =====
-    def handle_local_api(self, call_type, paras):
-        """尝试从本地数据响应 API 请求，返回 True 表示已处理"""
-        try:
-            if call_type == "GetGalList":
-                data = load_local_json(os.path.join(DATA_DIR, "galList.json"))
-                if data:
-                    self.send_ok(make_api_response(data, "_templetList"))
-                    return True
+    def handle_api(self, call_type, paras):
+        """处理原站 API 调用，返回本地数据"""
+        if call_type == "GetGalList":
+            data = load_local_json(os.path.join(DATA_DIR, "galList.json"))
+            if data:
+                self.send_api(data, "_templetList")
+            else:
+                self.send_api_error("galList.json 未下载")
+            return
 
-            elif call_type == "GetDrawingDir":
-                gal_path = paras.get("galPath", "")
-                data = get_local_tree(gal_path)
-                if data:
-                    self.send_ok(make_api_response(data, "_templetData"))
-                    return True
+        if call_type == "GetDrawingDir":
+            gal_path = paras.get("galPath", "")
+            data = get_local_tree(gal_path)
+            if data:
+                self.send_api(data, "_templetData")
+            else:
+                self.send_api_error("目录树未下载: " + gal_path)
+            return
 
-            elif call_type == "GetChildDrawingDir":
-                gal_path = paras.get("galPath", "")
-                parent_id = str(paras.get("parentId", ""))
-                # 1. 先从本地 children/ 缓存查
-                children = get_local_children(gal_path, parent_id)
-                if children:
-                    self.send_ok(make_api_response(children, "_templetData"))
-                    return True
-                # 2. 再从目录树 JSON 中查（如果树有嵌套 children）
-                tree = get_local_tree(gal_path)
-                if tree:
-                    children = self.find_children_by_id(tree, parent_id)
-                    if children:
-                        self.send_ok(make_api_response(children, "_templetData"))
-                        return True
-                # 无缓存 → 回退代理
+        if call_type == "GetChildDrawingDir":
+            gal_path = paras.get("galPath", "")
+            parent_id = str(paras.get("parentId", ""))
+            # 1. 直接从 children/ 缓存查
+            children = get_local_children(gal_path, parent_id)
+            if children is not None:
+                self.send_api(children, "_templetData")
+                return
+            # 2. 从目录树中递归查找
+            tree = get_local_tree(gal_path)
+            if tree:
+                found = find_children_in_tree(tree, parent_id)
+                if found is not None:
+                    self.send_api(found, "_templetData")
+                    return
+            # 没有数据 → 返回空数组（节点可能是叶子）
+            self.send_api([], "_templetData")
+            return
 
-            elif call_type == "GetNextContent":
-                # 翻页功能：本地树为扁平数据，无法翻页
-                # 回退代理
-                return False
+        if call_type == "QueryContent":
+            gal_path = paras.get("galPath", "")
+            keyword = paras.get("find", "")
+            if not keyword:
+                self.send_api([], "_templetData")
+                return
+            tree = get_local_tree(gal_path)
+            if not tree:
+                self.send_api_error("目录树未下载: " + gal_path)
+                return
+            # 本地树是扁平结构，需要加载所有 children 缓存拼成完整树再搜
+            full_tree = self._build_full_tree(gal_path, tree)
+            results = search_tree(full_tree, keyword)
+            self.send_api(results, "_templetData")
+            return
 
-            elif call_type == "QueryContent":
-                gal_path = paras.get("galPath", "")
-                keyword = paras.get("find", "")
-                tree = get_local_tree(gal_path)
-                if tree and keyword:
-                    results = self.search_tree(tree, keyword)
-                    if results:
-                        self.send_ok(make_api_response(results, "_templetData"))
-                        return True
-                    # 本地树扁平可能搜不到 → 回退代理
-                    return False
+        if call_type == "GetNextContent":
+            # 翻页功能：本地实现 - 在扁平节点列表中找当前节点的下一个
+            gal_path = paras.get("galPath", "")
+            current_id = str(paras.get("id", ""))
+            direction = str(paras.get("next", "1"))
+            tree = get_local_tree(gal_path)
+            if not tree:
+                self.send_api_error("目录树未下载")
+                return
+            full_tree = self._build_full_tree(gal_path, tree)
+            flat = self._flatten_tree(full_tree)
+            # 找当前节点位置
+            idx = -1
+            for i, node in enumerate(flat):
+                nid = node.get("id", "")
+                nid_num = nid[1:] if nid.startswith("F") else nid
+                if nid == current_id or nid_num == current_id:
+                    idx = i
+                    break
+            if idx == -1:
+                self.send_api([], "_templetData")
+                return
+            step = 1 if direction == "1" else -1
+            new_idx = idx + step
+            if 0 <= new_idx < len(flat):
+                # 只返回有 itempath 的叶子节点
+                target = flat[new_idx]
+                if target.get("itempath") and target.get("itemcontent"):
+                    self.send_api([target], "_templetData")
+                    return
+            self.send_api([], "_templetData")
+            return
 
-        except Exception as e:
-            pass
-        return False
+        # 未知 callType
+        self.send_api_error("未知调用: " + call_type)
 
-    def find_children_by_id(self, nodes, parent_id):
-        """在树中查找指定 ID 的子节点"""
-        parent_id = str(parent_id)
-        for node in nodes:
-            node_id = node.get("id", "")
-            if node_id == parent_id or node_id == "F" + parent_id:
+    def _build_full_tree(self, gal_path, nodes):
+        """将扁平的 children 缓存合并到目录树，构造完整树"""
+        safe = sanitize_filename(gal_path)
+        cdir = os.path.join(DATA_DIR, "children", safe)
+
+        def attach_children(node_list):
+            for node in node_list:
+                node_id = node.get("id", "")
+                pid = node_id[1:] if node_id.startswith("F") else node_id
+                # 如果节点已有 children，递归
                 if node.get("children"):
-                    return node["children"]
-                return []
-            if node_id.startswith("F"):
-                if node_id[1:] == parent_id:
-                    if node.get("children"):
-                        return node["children"]
-                    return []
-            if node.get("children"):
-                result = self.find_children_by_id(node["children"], parent_id)
-                if result:
-                    return result
-        return []
+                    attach_children(node["children"])
+                else:
+                    # 从缓存加载
+                    cpath = os.path.join(cdir, f"{pid}.json")
+                    cached = load_local_json(cpath)
+                    if cached:
+                        node["children"] = cached
+                        attach_children(cached)
 
-    def search_tree(self, nodes, keyword):
-        """在树中搜索关键词"""
-        results = []
-        lower_kw = keyword.lower()
-        for node in nodes:
-            text = node.get("text", "").lower()
-            if lower_kw in text:
-                results.append({
-                    "text": node.get("text", ""),
-                    "id": node.get("id", ""),
-                    "itempath": node.get("itempath", ""),
-                    "itemcontent": node.get("itemcontent", ""),
-                    "fullpath": node.get("fullpath", ""),
-                })
-            if node.get("children"):
-                results.extend(self.search_tree(node["children"], keyword))
-        return results
+        # 深拷贝避免污染
+        import copy
+        result = copy.deepcopy(nodes)
+        attach_children(result)
+        return result
 
-    # ===== GET 请求 =====
+    def _flatten_tree(self, nodes):
+        """扁平化树为节点列表（仅叶子节点：有 itempath）"""
+        result = []
+        def walk(node_list):
+            for node in node_list:
+                if node.get("itempath") and node.get("itemcontent"):
+                    result.append(node)
+                children = node.get("children")
+                if children:
+                    walk(children)
+        walk(nodes)
+        return result
+
+    # ----- GET 路由 -----
     def do_GET(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
         query = parsed.query
 
-        # 1. 本地前端文件
+        # 1. 前端静态文件
         if path in LOCAL_FILES or path == "":
-            file_to_serve = "index.html" if path in ("/", "") else path.lstrip("/")
-            self.serve_local_file("/" + file_to_serve)
+            self.serve_frontend(path)
             return
 
-        # 2. 本地 API: /api/galList
+        # 2. /api/galList （备用 GET 入口）
         if path == "/api/galList":
             data = load_local_json(os.path.join(DATA_DIR, "galList.json"))
             if data:
-                self.send_ok(json.dumps(data, ensure_ascii=False), "application/json; charset=utf-8")
+                self.send_json(data)
             else:
-                self.send_error(503, "数据未下载，请先运行 crawler.py")
+                self.send_not_found("galList not found")
             return
 
-        # 3. 本地 API: /api/tree/<bookPath>
-        match = re.match(r"^/api/tree/(.+)$", path)
-        if match:
-            book_path = urllib.parse.unquote(match.group(1))
+        # 3. /api/tree/<bookPath>
+        m = re.match(r"^/api/tree/(.+)$", path)
+        if m:
+            book_path = urllib.parse.unquote(m.group(1))
             data = get_local_tree(book_path)
             if data:
-                self.send_ok(json.dumps(data, ensure_ascii=False), "application/json; charset=utf-8")
+                self.send_json(data)
             else:
-                self.send_error(404, "Tree not found for: " + book_path)
+                self.send_not_found("Tree not found: " + book_path)
             return
 
-        # 4. 本地缓存的内容页: /api/content/<bookPath>/<base64path>/<content>
-        match = re.match(r"^/api/content/(.+)/(.+)/(.+)$", path)
-        if match:
-            book_path = urllib.parse.unquote(match.group(1))
-            itempath = urllib.parse.unquote(match.group(2))
-            itemcontent = urllib.parse.unquote(match.group(3))
+        # 4. /api/content/<bookPath>/<itempath>/<itemcontent>
+        m = re.match(r"^/api/content/(.+)/(.+)/(.+)$", path)
+        if m:
+            book_path = urllib.parse.unquote(m.group(1))
+            itempath = urllib.parse.unquote(m.group(2))
+            itemcontent = urllib.parse.unquote(m.group(3))
             content = get_local_content(book_path, itempath, itemcontent)
             if content:
-                self.send_ok(content, "text/html; charset=utf-8")
+                self.send_bytes(content, "text/html; charset=utf-8")
             else:
-                self.send_error(404, "Content not cached")
+                self.send_not_found("Content not cached")
             return
 
-        # 5. /proxy/ 前缀 → 先尝试本地缓存，再代理
-        if path.startswith("/proxy/"):
-            upstream_path = path[len("/proxy"):]
-            if query:
-                upstream_path += "?" + query
-
-            # 拦截图片/CSS/JS，优先本地缓存
-            if "/WebSource/" in path or path.endswith((".png", ".jpg", ".jpeg", ".gif", ".svg", ".css", ".ico")):
-                img_key = upstream_path  # /WebSource/Book/.../xxx.png
-                cached = get_local_image(img_key)
-                if cached:
-                    self.serve_local_file(cached)
+        # 5. 兼容原站路径: /ykyapp/App/ManualContentPage.aspx?gal=&path=&content=
+        if "/ManualContentPage.aspx" in path:
+            qs = urllib.parse.parse_qs(query)
+            gal = qs.get("gal", [""])[0]
+            ipath = qs.get("path", [""])[0]
+            icontent = qs.get("content", [""])[0]
+            if gal and ipath and icontent:
+                content = get_local_content(gal, ipath, icontent)
+                if content:
+                    self.send_bytes(content, "text/html; charset=utf-8")
                     return
-                # 代理并缓存
-                self.proxy_upstream_and_cache_image(upstream_path, img_key)
-                return
-
-            # 拦截内容页请求，优先本地缓存
-            if "/ManualContentPage.aspx" in path:
-                qs = urllib.parse.parse_qs(query)
-                gal = qs.get("gal", [""])[0]
-                ipath = qs.get("path", [""])[0]
-                icontent = qs.get("content", [""])[0]
-                if gal and ipath and icontent:
-                    content = get_local_content(gal, ipath, icontent)
-                    if content:
-                        self.send_ok(content, "text/html; charset=utf-8")
-                        return
-                    # 未缓存 → 代理并保存到本地
-                    self.proxy_upstream(upstream_path, method="GET",
-                                        save_content_key=(gal, ipath, icontent))
-                    return
-
-            self.proxy_upstream(upstream_path, method="GET")
+            self.send_not_found("内容页未缓存")
             return
 
-        # 6. 其他 GET → 代理（图片、CSS等）
-        self.proxy_upstream(self.path, method="GET")
+        # 6. 图片/CSS/字体等静态资源（路径以 /WebSource/ 等开头）
+        # 处理 /WebSource/..., /ykyapp/App/WebSource/..., /images/...
+        img_candidates = []
+        if path.startswith("/WebSource/"):
+            img_candidates.append(path)
+        elif "/WebSource/" in path:
+            # 兼容 /ykyapp/App/../../WebSource/... 形式
+            idx = path.find("/WebSource/")
+            img_candidates.append(path[idx:])
+        elif path.startswith("/images/"):
+            img_candidates.append(path)
 
-    # ===== POST 请求 =====
+        # 处理 .files/ 目录下的资源（如 1.files/image001.jpg，相对路径会请求 /ykyapp/App/1.files/...）
+        if not img_candidates:
+            ext = os.path.splitext(path)[1].lower()
+            if ext in (".jpg", ".jpeg", ".png", ".gif", ".svg", ".css", ".xml",
+                       ".mso", ".thmx", ".woff", ".woff2", ".ttf", ".eot"):
+                # 尝试从 query 中获取相对路径，或直接尝试在 images 目录中查找
+                pass
+
+        for cand in img_candidates:
+            # 同时尝试原始(URL编码)和解码后(中文)两种路径，因为本地存储用中文目录名
+            for variant in (cand, urllib.parse.unquote(cand)):
+                local_path = get_local_image_path(variant)
+                if local_path:
+                    self.serve_file(local_path)
+                    return
+
+        # 7. 兜底：返回 404
+        self.send_not_found("Not found: " + path)
+
+    # ----- POST 路由 -----
     def do_POST(self):
         parsed = urllib.parse.urlparse(self.path)
         path = parsed.path
-        query = parsed.query
 
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length) if content_length > 0 else b""
-        content_type = self.headers.get("Content-Type", "application/x-www-form-urlencoded")
 
-        # 1. 本地 API 端点: /api/
+        # 1. /api/ 端点
         if path.startswith("/api/"):
             call_type, paras = self.parse_api_body(body)
-            if self.handle_local_api(call_type, paras):
-                return
-            # 本地无法处理 → 返回错误，因为没有代理回退
-            try:
-                self.send_error(503, "Data not available locally")
-            except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
-                pass
+            self.handle_api(call_type, paras)
             return
 
-        # 2. /proxy/ 前缀 → 先尝试本地缓存，再代理
-        if path.startswith("/proxy/"):
-            upstream_path = path[len("/proxy"):]
-            if query:
-                upstream_path += "?" + query
-
-            # 拦截 API 请求：GetChildDrawingDir 写透缓存
-            if "/ykyApp.ashx" in path:
-                call_type, paras = self.parse_api_body(body)
-                if call_type == "GetChildDrawingDir":
-                    gal_path = paras.get("galPath", "")
-                    parent_id = str(paras.get("parentId", ""))
-                    # 先查本地缓存
-                    children = get_local_children(gal_path, parent_id)
-                    if children:
-                        self.send_ok(make_api_response(children, "_templetData"))
-                        return
-                    # 代理并缓存
-                    self.proxy_upstream_and_cache_children(
-                        upstream_path, gal_path, parent_id, body, content_type)
-                    return
-
-            self.proxy_upstream(upstream_path, method="POST", body=body,
-                                extra_headers={"Content-Type": content_type})
+        # 2. 兼容原站 API 路径: /ykyapp/App/ykyApp.ashx
+        if "/ykyApp.ashx" in path:
+            call_type, paras = self.parse_api_body(body)
+            self.handle_api(call_type, paras)
             return
 
-        # 3. 尝试本地 API
-        call_type, paras = self.parse_api_body(body)
-        if self.handle_local_api(call_type, paras):
-            return
-
-        # 4. 回退代理
-        self.proxy_upstream(self.path, method="POST", body=body,
-                            extra_headers={"Content-Type": content_type})
+        # 3. 其他 POST → 404
+        self.send_not_found("POST not handled: " + path)
 
     def do_OPTIONS(self):
         self.send_response(200)
@@ -626,92 +487,23 @@ class RequestHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
 
-def prefetch_deep_children(gal_path, nodes):
-    """后台线程：递归预取子节点的子节点（深度优先，最多3层）"""
-    def worker():
-        _prefetch_recursive(gal_path, nodes, depth=0, max_depth=3)
-    t = threading.Thread(target=worker, daemon=True)
-    t.start()
-
-
-def _api_opener():
-    """创建独立的 API opener"""
-    return urllib.request.build_opener(
-        urllib.request.HTTPCookieProcessor(CookieJar())
-    )
-
-
-def _prefetch_recursive(gal_path, nodes, depth, max_depth):
-    """递归预取子节点数据"""
-    if depth >= max_depth:
-        return
-
-    api_url = UPSTREAM + "/ykyapp/App/ykyApp.ashx"
-    opener = _api_opener()
-
-    for node in nodes:
-        node_id = node.get("id", "")
-        pid = node_id[1:] if node_id.startswith("F") else node_id
-        cache_key = (gal_path, pid)
-
-        # 跳过已缓存的
-        if get_local_children(gal_path, pid):
-            continue
-
-        # 控制频率
-        time.sleep(0.3)
-
-        try:
-            paras_json = json.dumps({
-                "galPath": gal_path,
-                "subPath": "Book",
-                "varData": "_templetData",
-                "parentId": int(pid) if pid.isdigit() else pid,
-                "userId": "0",
-            }, ensure_ascii=False)
-            body = urllib.parse.urlencode({
-                "callType": "GetChildDrawingDir",
-                "callParas": paras_json,
-            }).encode("utf-8")
-
-            req = urllib.request.Request(api_url, data=body, method="POST")
-            req.add_header("Content-Type", "application/x-www-form-urlencoded; charset=UTF-8")
-            req.add_header("User-Agent", "Mozilla/5.0")
-            req.add_header("Referer", UPSTREAM + "/ykyapp/App/WebBookIndex.aspx")
-
-            resp = opener.open(req, timeout=20)
-            text = resp.read().decode("utf-8")
-            match = re.search(r"var retJson=(\{.*?\});", text, re.DOTALL)
-            if match:
-                ret = json.loads(match.group(1))
-                sc = ret.get("scriptCode", "")
-                if "_templetData" in sc:
-                    children = execute_js_data(sc, "_templetData")
-                    if children:
-                        save_local_children(gal_path, pid, children)
-                        # 递归下一层
-                        _prefetch_recursive(gal_path, children, depth + 1, max_depth)
-        except Exception:
-            pass
-
-
 class ThreadingHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     daemon_threads = True
 
 
 def main():
-    server = ThreadingHTTPServer(("0.0.0.0", PORT), RequestHandler)
     has_data = os.path.exists(os.path.join(DATA_DIR, "galList.json"))
     print("=" * 60)
-    print("  机械工程师设计手册 - 工程手册服务器")
+    print("  机械工程师设计手册 - 本地服务器（纯离线）")
     print("=" * 60)
     print(f"  本地地址:  http://localhost:{PORT}/")
-    print(f"  数据缓存:  {'已就绪' if has_data else '未下载（需运行 crawler.py）'}")
-    print(f"  上游代理:  {UPSTREAM} (仅在缓存未命中时使用)")
+    print(f"  数据目录:  {DATA_DIR}")
+    print(f"  数据状态:  {'已就绪' if has_data else '未下载（请先运行 download_all.py）'}")
     print("=" * 60)
     print("  按 Ctrl+C 停止服务器")
     print("=" * 60)
     try:
+        server = ThreadingHTTPServer(("0.0.0.0", PORT), RequestHandler)
         server.serve_forever()
     except KeyboardInterrupt:
         print("\n服务器已停止")
